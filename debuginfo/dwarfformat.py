@@ -10,6 +10,7 @@ from collections import defaultdict
 from concurrent.futures.thread import ThreadPoolExecutor as PoolExecutor
 from concurrent.futures import as_completed
 from multiprocessing.dummy import Pool
+import sys
 
 
 class TagMapperError(Exception):
@@ -222,6 +223,10 @@ class DwarfFormat:
                 except Exception as e:
                     raise
                 else:
-                    print('%d finished, %d remained' % (mapper[f], i))
+                    sys.stdout.write('                                                            \r')
+                    sys.stdout.write('%d unit processed, %d remained, progress:%d%%\r' %
+                                     (mapper[f], i, 100 - (i*100/len(cus))))
+                    sys.stdout.flush()
                 finally:
                     i -= 1
+            print('')

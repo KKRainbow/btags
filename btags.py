@@ -20,7 +20,7 @@ if __name__ == '__main__':
     parser.\
         add_argument('-s', '--project-dir', help='The path in tag file will be relative to this')
     parser. \
-        add_argument('-t', '--tag-file', default='./ctags', help='Save path of generated tag file')
+        add_argument('-t', '--tag-file', default='./tags', help='Save path of generated tag file')
     parser. \
         add_argument('-d', '--database-file', default='./btag.sqlite',
                      help='The directory where the tag info database will be placed')
@@ -73,8 +73,18 @@ if __name__ == '__main__':
     if not df.has_debug_info():
         print('No debug info found in binary file.')
         exit()
-    df.parse(nb.jobs)
+
+    if not os.path.exists(db_path):
+        if not nb.new_db:
+            print('No database found, generating...')
+        else:
+            print('Generating tag info databases...')
+        df.parse(nb.jobs)
+
     if nb.only_database:
         exit()
+
+    print('Generating tag file...')
     ct = tag_format_mapper[nb.tag_file_format](db_path)
     ct.get_tag_file(open(tag_path, 'a+'), project_path)
+    print('Done!')
