@@ -17,11 +17,18 @@ class CtagFormat():
         self._session = self._op.session()
         self._curr_tag_line = None
         self._work_dir = os.curdir
+        self._comp_dir = None
 
     def _get_vi_field(self, tag):
         if tag.file is None:
             raise LackInfoException
-        file_path = os.path.join(tag.file.file_directory, tag.file.file_name)
+        #根据编译目录计算实际的绝对路径
+        if self._comp_dir is not None:
+            file_path = os.path.abspath(
+                os.path.join(self._comp_dir, tag.file.file_dir_rel_to_comp_dir, tag.file.file_name)
+            )
+        else:
+            file_path = os.path.join(tag.file.file_directory, tag.file.file_name)
         rel_path = os.path.relpath(file_path, self._work_dir)
 
         tmp_tag = tag
@@ -58,7 +65,7 @@ class CtagFormat():
 
         type_kind_mapper = {
             TagType.Class: 'c',
-            TagType.Define: 'd',
+            TagType.Macro: 'd',
             TagType.EnumerationMember: 'e',
             TagType.Enumeration: 'g',
             TagType.Member: 'm',
@@ -80,10 +87,11 @@ class CtagFormat():
                 self._curr_tag_line += '\t%s:%s' % (k, fields[k])
 
 
-    def get_tag_file(self, stream, work_dir=os.curdir):
+    def get_tag_file(self, stream, work_dir=os.curdir, comp_dir=None):
         self._work_dir = work_dir
+        self._comp_dir = comp_dir
         prev_tag = None
-        for tag in self._session.query(Tag).join(File).order_by(Tag.name, File.file_name, Tag.line_no).all():
+        for tag in self._session.query(Tag).join(File).join(CompileUnit).order_by(Tag.name, File.file_name, Tag.line_no).all():
             tag.type = int(tag.type)
             if prev_tag is not None and \
                             prev_tag.name == tag.name and \

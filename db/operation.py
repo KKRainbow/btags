@@ -7,12 +7,14 @@ from sqlalchemy import create_engine
 
 class Operation:
     Session = None
+    engine = None
     @classmethod
-    def prepare(cls, db_path='memory'):
-        engine = create_engine('sqlite:///' + db_path, strategy='threadlocal', echo=False)
-        if not os.path.exists(db_path):
-            Base.metadata.create_all(engine)
-        session_factory = sessionmaker(bind=engine)
+    def prepare(cls, db_path):
+        if cls.engine is None:
+            cls.engine = create_engine('sqlite:///' + db_path, echo=False)
+            if db_path == ':memory:' or not os.path.exists(db_path):
+                Base.metadata.create_all(cls.engine)
+        session_factory = sessionmaker(bind=cls.engine)
         cls.Session = scoped_session(session_factory)
 
     def __init__(self):
@@ -20,9 +22,11 @@ class Operation:
         self._file = None
         self._tags = []
 
-    def add_compilation_unit(self, filename):
+    def add_compilation_unit(self,comp_dir, comp_file):
         cu = CompileUnit()
-        path = normpath(filename)
+        path = normpath(comp_dir.strip() + os.path.sep + comp_file.strip())
+        cu.comp_dir = comp_dir
+        cu.comp_file = comp_file
         cu.object_name = path
         self._session.add(cu)
         return cu
@@ -31,11 +35,12 @@ class Operation:
         self._session.add(tag)
         return tag
 
-    def add_file(self, filepath):
+    def add_file(self, filepath, dir_reltocompdir):
         file = File()
         path = normpath(filepath)
         file.file_name = basename(path)
         file.file_directory = dirname(path)
+        file.file_dir_rel_to_comp_dir = dir_reltocompdir
         self._session.add(file)
         return file
 

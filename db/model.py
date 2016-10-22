@@ -17,10 +17,13 @@ class File(Base):
     id = Column(Integer, Sequence('fild_id_seq'), primary_key=True)
     file_name = Column(Text, nullable=False)
     file_directory = Column(Text, nullable=False)
+    file_dir_rel_to_comp_dir = Column(Text, nullable=False)
 
 
 class CompileUnit(Base):
     id = Column(Integer, Sequence('compile_unit_seq'), primary_key=True)
+    comp_dir = Column(String, nullable=False, default=".")
+    comp_file = Column(String, nullable=False)
     object_name = Column(Text, nullable=False)
 
 class CompileUnitFile(Base):
@@ -43,7 +46,6 @@ class TagType:
     Member = 11
     BaseType = 12
     FormalParameter = 13
-    Define = 14
 
 
 class Tag(Base):

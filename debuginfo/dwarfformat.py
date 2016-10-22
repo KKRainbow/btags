@@ -1,27 +1,85 @@
 from elftools.elf.elffile import ELFFile
-from elftools.dwarf.dwarfinfo import DWARFInfo
 from os.path import sep, normpath
 from elftools.dwarf.descriptions import describe_attr_value
 from elftools.common.py3compat import bytes2str
-from elftools.dwarf.die import DIE
 from db.model import *
 from db.operation import *
 from collections import defaultdict
 from concurrent.futures.thread import ThreadPoolExecutor as PoolExecutor
 from concurrent.futures import as_completed
-from multiprocessing.dummy import Pool
+from elftoolsext.macro import Macro
+from io import BytesIO
 import sys
 
 
 class TagMapperError(Exception):
     pass
 
-class DwarfFormatParser:
-    def __init__(self, file_path, cu_number, op):
-        self._op = op
-        self._cu_number = cu_number
+
+class DwarfInfoCache(object):
+    def __init__(self, file_path):
+        """
+        :type elffile ELFFile
+        :param elffile:
+        """
         self._elffile = ELFFile(open(file_path, 'rb'))
-        self._dwarfinfo = self._elffile.get_dwarf_info()
+        self._file_path = file_path
+        self._dwarf_info = self._get_new_dwarf_info()
+        self._cu_list = None
+        self._macro_list = None
+        self.get_cu_list()
+        self._get_macro_list()
+        self._cu_macinfo_mapper = None
+        self.get_macro_info_of_cu_idx(0)
+
+    def _get_new_dwarf_info(self):
+        return self._elffile.get_dwarf_info()
+
+    def get_cu_list(self):
+        if self._cu_list is None:
+            self._cu_list = list(self._dwarf_info.iter_CUs())
+        return self._cu_list
+
+    def get_cu_with_new_stream(self, idx):
+        self._elffile = ELFFile(open(self._file_path, 'rb'))
+        cu = self.get_cu_list()[idx]
+        cu.dwarfinfo = self._get_new_dwarf_info()
+        return cu
+
+    def get_elf_file(self):
+        return self._elffile
+
+    def _get_macro_list(self):
+        if self._macro_list is None:
+            macro = Macro.get_macro_info_from_elffile(self._elffile)
+            self._macro_list = macro.get_macro_list()
+        return self._macro_list
+
+    def get_macro_info_of_cu_idx(self, cu_idx):
+        if self._cu_macinfo_mapper is None:
+            self._cu_macinfo_mapper = dict()
+            l = self._get_macro_list()
+            icu = 0
+            imac = 0
+            for cu in self.get_cu_list():
+                if 'DW_AT_macro_info' in cu.get_top_DIE().attributes:
+                    self._cu_macinfo_mapper[icu] = l[imac]
+                    imac += 1
+                else:
+                    self._cu_macinfo_mapper[icu] = None
+                icu += 1
+        return self._cu_macinfo_mapper[cu_idx]
+
+
+
+class DwarfFormatParser:
+    def __init__(self, cache, cu_numbers, op):
+        self.cache = cache
+        self._op = op
+        self._cu_number_list = cu_numbers
+        self._cu_number = 0
+        self._elffile = cache.get_elf_file()
+        self._dwarfinfo = cache._dwarf_info
         self._section_offset = self._dwarfinfo.debug_info_sec.global_offset
         self._file_map = None
         self._current_cu = None
@@ -65,14 +123,18 @@ class DwarfFormatParser:
         self._get_file_mapper(cu, file_directory)
 
         abs_path = file_directory.strip() + sep + file_name.strip()
+
+        macinfo = self.cache.get_macro_info_of_cu_idx(self._cu_number)
         if len(abs_path) == 0:
             raise Exception('Compile Unit has incomplete information')
         else:
-            self._current_cu = self._op.add_compilation_unit(abs_path)
+            self._current_cu = self._op.add_compilation_unit(file_directory, file_name)
             self._tag_stack = [(compile_unit_die, Tag())]
             self._tag_to_add = []
             for other_die in dies:
                 self._parse_tags(other_die)
+            if macinfo is not None:
+                self._parse_macro_info(macinfo)
 
     def _get_file_mapper(self, cu, comp_dir):
         lineprogram = self._dwarfinfo.line_program_for_CU(cu)
@@ -87,10 +149,9 @@ class DwarfFormatParser:
                 dir = b'.'
             file_name = '%s/%s/%s' % (comp_dir, bytes2str(dir), file_name)
             file_name = normpath(file_name)
-            file = self._op.add_file(file_name)
+            file = self._op.add_file(file_name, bytes2str(dir))
             self._file_map[index] = file
             index += 1
-        self._op.commit()
 
     def _parse_tags(self, die):
         tag_mapper_key = '<0x%x>' % die.offset
@@ -106,9 +167,9 @@ class DwarfFormatParser:
             DW_TAG_typedef=TagType.Typedef,
             DW_TAG_member=TagType.Member,
             DW_TAG_structure_type=TagType.Structure,
-            DW_TAG_union=TagType.Union,
+            DW_TAG_union_type=TagType.Union,
             DW_TAG_subprogram=TagType.Function,
-            DW_TAG_class=TagType.Class,
+            DW_TAG_class_type=TagType.Class,
             DW_TAG_enumeration_type=TagType.Enumeration,
             DW_TAG_enumerator=TagType.EnumerationMember,
             DW_TAG_formal_parameter=TagType.FormalParameter
@@ -183,13 +244,28 @@ class DwarfFormatParser:
                 else:
                     tmp_tag = tmp_tag.assoc_to_tag
             tag.assoc_to_tag = tmp_tag
+            self._op.add_tag(tag)
+
+    def _parse_macro_info(self, macinfo):
+        for item in macinfo:
+            if item.file_idx <= 0:
+                continue
+            tag = Tag()
+            tag.file = self._file_map[item.file_idx]
+            tag.compile_unit = self._current_cu
+            tag.line_no = item.line_num
+            tag.name = item.macro_name
+            tag.type = TagType.Macro
+            self._tag_to_add.append(tag)
 
     def parse(self):
-        cus = list(self._dwarfinfo.iter_CUs())
-        self._tag_mapper = dict()
-        self._parse_compilation_unit(cus[self._cu_number])
-        self._fold_assoc_tag()
-        self._op.commit()
+        self._macro_section_counter = 0
+        for cu_num in self._cu_number_list:
+            cu = self.cache.get_cu_with_new_stream(cu_num)
+            self._cu_number = cu_num
+            self._tag_mapper = dict()
+            self._parse_compilation_unit(cu)
+            self._fold_assoc_tag()
 
 
 class DwarfFormat:
@@ -198,7 +274,9 @@ class DwarfFormat:
         self._file_path = file_path
         self._dwarfinfo = None
         self.db_path = db_path
+        self.cache = DwarfInfoCache(file_path)
         self.prepare()
+        self._op_list = list()
 
     def has_debug_info(self):
         return self._elffile.has_dwarf_info()
@@ -208,25 +286,38 @@ class DwarfFormat:
             self._dwarfinfo = self._elffile.get_dwarf_info()
 
     def _parser_helper(self, num):
-        parser = DwarfFormatParser(self._file_path, num, Operation())
+        op = Operation()
+        self._op_list.append(op)
+        parser = DwarfFormatParser(self.cache, num, op)
         return parser.parse()
 
     def parse(self, concurrency_level=2):
         Operation.prepare(self.db_path)
-        cus = list(self._dwarfinfo.iter_CUs())
+        cus = list(self.cache.get_cu_list())
+        self.cache.get_cu_list()
         i = len(cus)
         with PoolExecutor(max_workers=concurrency_level) as executor:
-            mapper = {executor.submit(self._parser_helper, n): n for n in range(len(cus))}
+            mapper = {executor.submit(self._parser_helper, [n]): n for n in range(len(cus))}
             for f in as_completed(mapper):
                 try:
                     f.result()
                 except Exception as e:
                     raise
                 else:
-                    sys.stdout.write('                                                            \r')
-                    sys.stdout.write('%d unit processed, %d remained, progress:%d%%\r' %
-                                     (mapper[f], i, 100 - (i*100/len(cus))))
+                    sys.stdout.write('\r                                                            \r')
+                    sys.stdout.write('%d unit processed, %d remained, progress:%d%%' %
+                                     (mapper[f], i, 100 - (i * 100 / len(cus))))
                     sys.stdout.flush()
                 finally:
                     i -= 1
             print('')
+        i = len(self._op_list)
+        sys.stdout.write('Committing to database!\n')
+        for op in self._op_list:
+            sys.stdout.write('\r                                                            \r')
+            sys.stdout.write('%d unit committed, %d remained, progress: %d%% ' %
+                             (len(self._op_list) - i, i, 100 - (i * 100 / len(self._op_list))))
+            i -= 1
+            sys.stdout.flush()
+            op.commit()
+        print('')

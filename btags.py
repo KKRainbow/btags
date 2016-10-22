@@ -20,9 +20,12 @@ if __name__ == '__main__':
     parser.\
         add_argument('-s', '--project-dir', help='The path in tag file will be relative to this')
     parser. \
+        add_argument('-c', '--compile-dir',
+                     help='THe actual compile directory, program uses this to evaluate the paths in tag file')
+    parser. \
         add_argument('-t', '--tag-file', default='./tags', help='Save path of generated tag file')
     parser. \
-        add_argument('-d', '--database-file', default='./btag.sqlite',
+        add_argument('-d', '--database-file', default='./tag.sqlite',
                      help='The directory where the tag info database will be placed')
     parser.\
         add_argument('-o', '--only-database', help='Only generate tag info database, do not generate tag file',
@@ -51,10 +54,6 @@ if __name__ == '__main__':
     parser. \
         add_argument('binary_file', nargs=1, help='The path of the binary file with debug info',
                      type=ap.FileType('rb'))
-
-    bin_path = '/home/sunsijie/Project/barrelfish/build/x86_64/sbin/cpu'
-    db_path = '/home/sunsijie/test.sqlite'
-    tag_path = '/home/sunsijie/tags'
 
     nb = parser.parse_args()
     bin_path = nb.binary_file[0].name
@@ -86,5 +85,5 @@ if __name__ == '__main__':
 
     print('Generating tag file...')
     ct = tag_format_mapper[nb.tag_file_format](db_path)
-    ct.get_tag_file(open(tag_path, 'a+'), project_path)
+    ct.get_tag_file(open(tag_path, 'a+'), project_path, nb.compile_dir)
     print('Done!')
