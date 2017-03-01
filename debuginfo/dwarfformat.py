@@ -52,7 +52,8 @@ class DwarfInfoCache(object):
     def _get_macro_list(self):
         if self._macro_list is None:
             macro = Macro.get_macro_info_from_elffile(self._elffile)
-            self._macro_list = macro.get_macro_list()
+            if macro is not None:
+                self._macro_list = macro.get_macro_list()
         return self._macro_list
 
     def get_macro_info_of_cu_idx(self, cu_idx):
@@ -68,7 +69,10 @@ class DwarfInfoCache(object):
                 else:
                     self._cu_macinfo_mapper[icu] = None
                 icu += 1
-        return self._cu_macinfo_mapper[cu_idx]
+        if cu_idx < 0 or cu_idx >= len(self._cu_macinfo_mapper):
+            return None
+        else:
+            return self._cu_macinfo_mapper[cu_idx]
 
 
 
