@@ -2,13 +2,13 @@ from elftools.elf.elffile import ELFFile
 from os.path import sep, normpath
 from elftools.dwarf.descriptions import describe_attr_value
 from elftools.common.py3compat import bytes2str
-from db.model import *
 from db.operation import *
 from collections import defaultdict
 from concurrent.futures.thread import ThreadPoolExecutor as PoolExecutor
 from concurrent.futures import as_completed
 from elftoolsext.macro import Macro
-from io import BytesIO
+from .runner import Task
+
 import sys
 
 
@@ -325,3 +325,23 @@ class DwarfFormat:
             sys.stdout.flush()
             op.commit()
         print('')
+
+
+class DwarfInfoParseError(Exception):
+    pass
+
+
+class DwarfInfoParseTask(Task):
+    def __init__(self, cu,  op, file_path, comp_path = None):
+        super(DwarfInfoParseTask, self).__init__()
+        self.cu = cu
+        self.comp_path = comp_path
+        self.op = op
+        self.file_path = file_path
+        self.file_mapper = None
+        self.elf_file = None
+
+    def _before_run(self):
+        if not os.path.exists(self.file_path):
+            raise DwarfInfoParseError("Binary file not found")
+
