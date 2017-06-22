@@ -22,12 +22,13 @@ class Operation:
         self._file = None
         self._tags = []
 
-    def add_compilation_unit(self,comp_dir, comp_file):
+    def add_compilation_unit(self, comp_dir, comp_file, index):
         cu = CompileUnit()
         path = normpath(comp_dir.strip() + os.path.sep + comp_file.strip())
         cu.comp_dir = comp_dir
         cu.comp_file = comp_file
         cu.object_name = path
+        cu.id = index
         self._session.add(cu)
         return cu
 
@@ -35,9 +36,10 @@ class Operation:
         self._session.add(tag)
         return tag
 
-    def add_file(self, filepath, dir_reltocompdir):
+    def add_file(self, filename, dir_reltocompdir):
         file = File()
-        path = normpath(filepath)
+        file_path = "{}/{}".format(dir_reltocompdir, filename)
+        path = normpath(file_path)
         file.file_name = basename(path)
         file.file_directory = dirname(path)
         file.file_dir_rel_to_comp_dir = dir_reltocompdir

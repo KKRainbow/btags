@@ -20,7 +20,6 @@ TypeCodeMap = dict(
     NULL=0x00
 )
 
-FileTuple = namedtuple('FileTuple', 'dir file')
 MacroInfoTuple = namedtuple('MacroInfoTuple',
                             'macro_name macro_full_name macro_content line_num file_idx')
 
@@ -67,7 +66,7 @@ class Macro(object):
             address_size=config.default_address_size)
         return Macro(dwarf_section.stream, structs)
 
-    def get_macro_list(self) -> MacroInfoTuple:
+    def get_macro_list(self):
         if self._macro_list is not None:
             return self._macro_list
 
@@ -104,7 +103,6 @@ class Macro(object):
                 continue
         self._macro_list = result
         return result
-
 
     def iter_macro_info(self):
         self.stream.seek(0, os.SEEK_END)
@@ -152,23 +150,3 @@ class Macro(object):
             e = struct_parse(entry, self.stream)
         e['type'] = type_name
         return e
-
-
-def get_file_entry_from_cu(dwarf_info, cu) -> FileTuple:
-    """
-    :type cu CompileUnit
-    :type dwarf_info DWARFInfo
-    :return:
-    """
-    line_program = dwarf_info.line_program_for_CU(cu)
-    index = 1
-    file_map = dict()
-    for entry in line_program['file_entry']:
-        file_name = bytes2str(entry.name)
-        dir_index = entry.dir_index
-        if dir_index > 0:
-            dir = line_program['include_directory'][dir_index - 1]
-        else:
-            dir = b'.'
-        file_map[index] = FileTuple(dir=dir, file=file_name)
-    return file_map

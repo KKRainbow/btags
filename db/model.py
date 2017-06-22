@@ -22,9 +22,10 @@ class File(Base):
 
 class CompileUnit(Base):
     id = Column(Integer, Sequence('compile_unit_seq'), primary_key=True)
-    comp_dir = Column(String, nullable=False, default=".")
+    comp_dir = Column(String, nullable=False)
     comp_file = Column(String, nullable=False)
     object_name = Column(Text, nullable=False)
+
 
 class CompileUnitFile(Base):
     id = Column(Integer, Sequence('compile_unit_file_seq'), primary_key=True)

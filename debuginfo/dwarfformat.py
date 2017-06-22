@@ -1,11 +1,11 @@
-from elftools.elf.elffile import ELFFile
+from elftools.elf.elffile import ELFFile, DWARFInfo
+from elftools.common.py3compat import BytesIO
+from elftools.dwarf.compileunit import CompileUnit
 from os.path import sep, normpath
 from elftools.dwarf.descriptions import describe_attr_value
 from elftools.common.py3compat import bytes2str
 from db.operation import *
-from collections import defaultdict
-from concurrent.futures.thread import ThreadPoolExecutor as PoolExecutor
-from concurrent.futures import as_completed
+from collections import defaultdict, namedtuple
 from elftoolsext.macro import Macro
 from .runner import Task
 
@@ -16,82 +16,24 @@ class TagMapperError(Exception):
     pass
 
 
-class DwarfInfoCache(object):
-    def __init__(self, file_path):
-        """
-        :type elffile ELFFile
-        :param elffile:
-        """
-        self._elffile = ELFFile(open(file_path, 'rb'))
-        self._file_path = file_path
-        self._dwarf_info = self._get_new_dwarf_info()
-        self._cu_list = None
-        self._macro_list = None
-        self.get_cu_list()
-        self._get_macro_list()
-        self._cu_macinfo_mapper = None
-        self.get_macro_info_of_cu_idx(0)
-
-    def _get_new_dwarf_info(self):
-        return self._elffile.get_dwarf_info()
-
-    def get_cu_list(self):
-        if self._cu_list is None:
-            self._cu_list = list(self._dwarf_info.iter_CUs())
-        return self._cu_list
-
-    def get_cu_with_new_stream(self, idx):
-        self._elffile = ELFFile(open(self._file_path, 'rb'))
-        cu = self.get_cu_list()[idx]
-        cu.dwarfinfo = self._get_new_dwarf_info()
-        return cu
-
-    def get_elf_file(self):
-        return self._elffile
-
-    def _get_macro_list(self):
-        if self._macro_list is None:
-            macro = Macro.get_macro_info_from_elffile(self._elffile)
-            if macro is not None:
-                self._macro_list = macro.get_macro_list()
-        return self._macro_list
-
-    def get_macro_info_of_cu_idx(self, cu_idx):
-        if self._cu_macinfo_mapper is None:
-            self._cu_macinfo_mapper = dict()
-            l = self._get_macro_list()
-            icu = 0
-            imac = 0
-            for cu in self.get_cu_list():
-                if 'DW_AT_macro_info' in cu.get_top_DIE().attributes:
-                    self._cu_macinfo_mapper[icu] = l[imac]
-                    imac += 1
-                else:
-                    self._cu_macinfo_mapper[icu] = None
-                icu += 1
-        if cu_idx < 0 or cu_idx >= len(self._cu_macinfo_mapper):
-            return None
-        else:
-            return self._cu_macinfo_mapper[cu_idx]
+class DwarfInfoBeforeParseError(Exception):
+    pass
 
 
+class DwarfInfoParseError(Exception):
+    pass
 
-class DwarfFormatParser:
-    def __init__(self, cache, cu_numbers, op):
-        self.cache = cache
-        self._op = op
-        self._cu_number_list = cu_numbers
-        self._cu_number = 0
-        self._elffile = cache.get_elf_file()
-        self._dwarfinfo = cache._dwarf_info
-        self._section_offset = self._dwarfinfo.debug_info_sec.global_offset
-        self._file_map = None
-        self._current_cu = None
-        self._tag_stack = None
-        self._tag_mapper = None
-        self._tag_to_add = None
 
-    def _get_die_attributes_dict(self, die):
+class DwarfInfoParseAfterError(Exception):
+    pass
+
+
+class DwarfInfoParseTask(Task):
+    _dwarf_info_bytes = None
+    _dwarf_line_bytes = None
+
+    @staticmethod
+    def _get_die_attributes_dict(die, global_offset):
         res = defaultdict()
         for attr in iter(die.attributes.values()):
             name = attr.name
@@ -99,148 +41,172 @@ class DwarfFormatParser:
                 continue
             else:
                 try:
-                    description = str(describe_attr_value(attr, die, self._section_offset)).strip()
-                except Exception:
+                    description = str(describe_attr_value(attr, die, global_offset)).strip()
+                except KeyError:
                     pass
                 else:
-                    if (len(description) == 0):
+                    if len(description) == 0:
                         continue
                     else:
                         res[name] = description
         return res
 
-    def _parse_compilation_unit(self, cu):
-        die_iter = cu.iter_DIEs()
-        dies = list(die_iter)
+    @classmethod
+    def set_dwarf_info_buffer(cls, dwarf_info : DWARFInfo):
+        dwarf_info.debug_info_sec.stream.seek(0, os.SEEK_SET)
+        dwarf_info.debug_line_sec.stream.seek(0, os.SEEK_SET)
+        cls._dwarf_info_bytes = dwarf_info.debug_info_sec.stream.getvalue()
+        cls._dwarf_line_bytes = dwarf_info.debug_line_sec.stream.getvalue()
 
-        compile_unit_die = dies.pop(0)
-        assert not compile_unit_die.is_null() and self._get_die_tag(compile_unit_die) == 'DW_TAG_compile_unit'
+    @classmethod
+    def clear_dwarf_buffer(cls):
+        cls._dwarf_info_bytes = None
+        cls._dwarf_line_bytes = None
 
-        attrs = self._get_die_attributes_dict(compile_unit_die)
+    __slots__ = ["_cu", "_op", "_dwarf_info", "_file_map", "_cu_db_item"]
 
-        pair = attrs['DW_AT_name'].strip().split('): ')
-        file_name = (pair[0] if len(pair) == 1 else pair[1]) if len(pair) != 0 else None
+    def __init__(self, cu: CompileUnit,  op: Operation, file_map: dict, index: int):
+        super(DwarfInfoParseTask, self).__init__()
+        self._cu = cu
+        self._op = op
+        self._dwarf_info = None
+        self.index = index
+        self._file_map = file_map
+        self._cu_db_item = None
 
-        pair = attrs['DW_AT_comp_dir'].strip().split('): ')
-        file_directory = (pair[0] if len(pair) == 1 else pair[1]) if len(pair) != 0 else None
+    def _before_run(self):
+        super(DwarfInfoParseTask, self)._before_run()
+        if len(self._dwarf_info_bytes) == 0:
+            raise DwarfInfoBeforeParseError("Bytes of info section is empty")
+        if len(self._dwarf_line_bytes) == 0:
+            raise DwarfInfoBeforeParseError("Bytes of line section is empty")
+        if self._file_map is None:
+            raise DwarfInfoBeforeParseError("No file map found")
 
-        self._get_file_mapper(cu, file_directory)
+        self._cu.dwarfinfo.debug_info_sec = \
+            self._cu.dwarfinfo.debug_info_sec._replace(stream=BytesIO(self._dwarf_info_bytes))
+        self._cu.dwarfinfo.debug_line_sec = \
+            self._cu.dwarfinfo.debug_line_sec._replace(stream=BytesIO(self._dwarf_line_bytes))
 
-        abs_path = file_directory.strip() + sep + file_name.strip()
+        global_offset = self._cu.dwarfinfo.debug_info_sec.global_offset
+        if global_offset == 0:
+            raise DwarfInfoBeforeParseError("Global offset is zero")
 
-        macinfo = self.cache.get_macro_info_of_cu_idx(self._cu_number)
-        if len(abs_path) == 0:
-            raise Exception('Compile Unit has incomplete information')
-        else:
-            self._current_cu = self._op.add_compilation_unit(file_directory, file_name)
-            self._tag_stack = [(compile_unit_die, Tag())]
-            self._tag_to_add = []
-            for other_die in dies:
-                self._parse_tags(other_die)
-            if macinfo is not None:
-                self._parse_macro_info(macinfo)
+        self._dwarf_info = self._cu.dwarfinfo
+        if self._dwarf_info is None:
+            raise DwarfInfoBeforeParseError("Dwarf info object should not be None")
 
-    def _get_file_mapper(self, cu, comp_dir):
-        lineprogram = self._dwarfinfo.line_program_for_CU(cu)
-        index = 1
-        self._file_map = dict()
-        for file_entry in lineprogram['file_entry']:
-            file_name = bytes2str(file_entry.name)
-            dir_index = file_entry.dir_index
-            if dir_index > 0:
-                dir = lineprogram['include_directory'][dir_index - 1]
+        top_die = self._cu.get_top_DIE()
+        assert not top_die.is_null() and top_die.tag == 'DW_TAG_compile_unit'
+
+        attributes = self._get_die_attributes_dict(top_die, global_offset)
+
+        pair = attributes['DW_AT_name'].strip().split('): ')
+        cu_file_name = (pair[0] if len(pair) == 1 else pair[1]) if len(pair) != 0 else None
+
+        pair = attributes['DW_AT_comp_dir'].strip().split('): ')
+        cu_file_directory = (pair[0] if len(pair) == 1 else pair[1]) if len(pair) != 0 else None
+
+        file_full_path = cu_file_directory.strip() + sep + cu_file_name.strip()
+        if not os.path.exists(file_full_path):
+            sys.stderr.write("Warning: file {} doesn't exist!\n".format(file_full_path))
+
+        self._cu_db_item = self._op.add_compilation_unit(cu_file_directory, cu_file_name, self.index)
+
+    def _run(self):
+        file_map = self._file_map
+        tag_stack = [(self._cu.get_top_DIE(), Tag())]
+        tag_to_add = []
+        tag_map = dict()
+
+        def parse_tags(die):
+            tag_mapper_key = '<0x%x>' % die.offset
+            try:
+                tag = tag_map[tag_mapper_key]
+            except KeyError:
+                tag = Tag()
+                tag_map[tag_mapper_key] = tag
+
+            tag_type_map = dict(
+                DW_TAG_variable=TagType.Variable,
+                DW_TAG_base_type=TagType.BaseType,
+                DW_TAG_typedef=TagType.Typedef,
+                DW_TAG_member=TagType.Member,
+                DW_TAG_structure_type=TagType.Structure,
+                DW_TAG_union_type=TagType.Union,
+                DW_TAG_subprogram=TagType.Function,
+                DW_TAG_class_type=TagType.Class,
+                DW_TAG_enumeration_type=TagType.Enumeration,
+                DW_TAG_enumerator=TagType.EnumerationMember,
+                DW_TAG_formal_parameter=TagType.FormalParameter
+            )
+            attributes = self._get_die_attributes_dict(die, self._cu.dwarfinfo.debug_line_sec.global_offset)
+            tag_type = die.tag
+            try:
+                tag.type = tag_type_map[tag_type]
+                pair = attributes['DW_AT_name'].strip().split('):')
+
+                tag.name = pair[0] if len(pair) == 1 else pair[1]
+                tag.name = tag.name.strip()
+
+                if tag.type != TagType.EnumerationMember:
+                    tag.line_no = int(attributes['DW_AT_decl_line']) if tag.type != TagType.BaseType else None
+                    tag.file = file_map[int(attributes['DW_AT_decl_file'])] \
+                        if tag.type != TagType.BaseType else file_map[1]
+
+                if tag.type in [TagType.Typedef] and 'DW_AT_type' in attributes.keys():
+                    to_type = attributes['DW_AT_type']
+                    if to_type not in tag_map.keys():
+                        tag_map[to_type] = Tag()
+                    tag.tmp_assoc_to_tag = tag_map[to_type]
+            except KeyError:
+                tag.name = None
+            except TagMapperError:
+                tag.name = None
             else:
-                dir = b'.'
-            file_name = '%s/%s/%s' % (comp_dir, bytes2str(dir), file_name)
-            file_name = normpath(file_name)
-            file = self._op.add_file(file_name, bytes2str(dir))
-            self._file_map[index] = file
-            index += 1
+                i = len(tag_stack) - 1
+                while i > 0:
+                    (parent_die, parent_tag) = tag_stack[i]
+                    if parent_tag.name is not None:
+                        tag.parent_tag = parent_tag
+                    i -= 1
+                if tag.name is None:
+                    raise Exception
+                if tag.type in [TagType.EnumerationMember, TagType.FormalParameter, TagType.Member] \
+                        and tag.parent_tag is not None \
+                        and tag.parent_tag.type in \
+                                [TagType.Enumeration, TagType.Function, TagType.Structure, TagType.Class]:
+                    tag.tmp_assoc_to_tag = tag.parent_tag
 
-    def _parse_tags(self, die):
-        tag_mapper_key = '<0x%x>' % die.offset
-        try:
-            tag = self._tag_mapper[tag_mapper_key]
-        except KeyError:
-            tag = Tag()
-            self._tag_mapper[tag_mapper_key] = tag
+                if tag.type == TagType.EnumerationMember:
+                    """
+                    find a parent with file field
+                    """
+                    tmp_tag = tag.tmp_assoc_to_tag
+                    while tmp_tag is not None and tmp_tag.file is None:
+                        tmp_tag = tag.parent_tag
+                    if tmp_tag is not None:
+                        tag.file = tmp_tag.file
 
-        tag_type_mapper = dict(
-            DW_TAG_variable=TagType.Variable,
-            DW_TAG_base_type=TagType.BaseType,
-            DW_TAG_typedef=TagType.Typedef,
-            DW_TAG_member=TagType.Member,
-            DW_TAG_structure_type=TagType.Structure,
-            DW_TAG_union_type=TagType.Union,
-            DW_TAG_subprogram=TagType.Function,
-            DW_TAG_class_type=TagType.Class,
-            DW_TAG_enumeration_type=TagType.Enumeration,
-            DW_TAG_enumerator=TagType.EnumerationMember,
-            DW_TAG_formal_parameter=TagType.FormalParameter
-        )
-        attrs = self._get_die_attributes_dict(die)
-        tag_type = self._get_die_tag(die)
-        try:
-            tag.type = tag_type_mapper[tag_type]
-            pair = attrs['DW_AT_name'].strip().split('):')
+                tag.compile_unit = self._cu_db_item
+                tag_to_add.append(tag)
+            finally:
+                # 处理栈
+                if die.has_children:
+                    tag_stack.append((die, tag))
+                elif die.is_null():
+                    tag_stack.pop()
+        die_iter = self._cu.iter_DIEs()
+        top = True
+        for cur_die in die_iter:
+            if top:
+                top = False
+                continue
+            else:
+                parse_tags(cur_die)
 
-            tag.name = pair[0] if len(pair) == 1 else pair[1]
-            tag.name = tag.name.strip()
-
-            if tag.type != TagType.EnumerationMember:
-                tag.line_no = int(attrs['DW_AT_decl_line']) if tag.type != TagType.BaseType else None
-                tag.file = self._file_map[int(attrs['DW_AT_decl_file'])] \
-                    if tag.type != TagType.BaseType else self._file_map[1]
-
-            if tag.type in [TagType.Typedef] and 'DW_AT_type' in attrs.keys():
-                to_type = attrs['DW_AT_type']
-                if to_type not in self._tag_mapper.keys():
-                    self._tag_mapper[to_type] = Tag()
-                tag.tmp_assoc_to_tag = self._tag_mapper[to_type]
-        except KeyError:
-            tag.name = None
-        except TagMapperError:
-            tag.name = None
-        else:
-            i = len(self._tag_stack) - 1
-            while i > 0:
-                (parent_die, parent_tag) = self._tag_stack[i]
-                if parent_tag.name is not None:
-                    tag.parent_tag = parent_tag
-                i -= 1
-            if tag.name is None:
-                raise Exception
-            if tag.type in [TagType.EnumerationMember, TagType.FormalParameter, TagType.Member] \
-                    and tag.parent_tag is not None \
-                    and tag.parent_tag.type in \
-                            [TagType.Enumeration, TagType.Function, TagType.Structure, TagType.Class]:
-                tag.tmp_assoc_to_tag = tag.parent_tag
-
-            if tag.type == TagType.EnumerationMember:
-                """
-                find a parent with file field
-                """
-                tmp_tag = tag.tmp_assoc_to_tag
-                while tmp_tag is not None and tmp_tag.file is None:
-                    tmp_tag = tag.parent_tag
-                if tmp_tag is not None:
-                    tag.file = tmp_tag.file
-
-            tag.compile_unit = self._current_cu
-            self._tag_to_add.append(tag)
-        finally:
-            # 处理栈
-            if die.has_children:
-                self._tag_stack.append((die, tag))
-            elif die.is_null():
-                self._tag_stack.pop()
-
-    @staticmethod
-    def _get_die_tag(die):
-        return die.tag
-
-    def _fold_assoc_tag(self):
-        for tag in self._tag_to_add:
+        # fold the tags
+        for tag in tag_to_add:
             tmp_tag = tag.tmp_assoc_to_tag
             while tmp_tag is not None:
                 if tmp_tag.name is not None:
@@ -250,98 +216,111 @@ class DwarfFormatParser:
             tag.assoc_to_tag = tmp_tag
             self._op.add_tag(tag)
 
-    def _parse_macro_info(self, macinfo):
-        for item in macinfo:
-            if item.file_idx <= 0:
-                continue
-            tag = Tag()
-            tag.file = self._file_map[item.file_idx]
-            tag.compile_unit = self._current_cu
-            tag.line_no = item.line_num
-            tag.name = item.macro_name
-            tag.type = TagType.Macro
-            self._tag_to_add.append(tag)
-
-    def parse(self):
-        self._macro_section_counter = 0
-        for cu_num in self._cu_number_list:
-            cu = self.cache.get_cu_with_new_stream(cu_num)
-            self._cu_number = cu_num
-            self._tag_mapper = dict()
-            self._parse_compilation_unit(cu)
-            self._fold_assoc_tag()
+    def _after_run(self):
+        super(DwarfInfoParseTask, self)._after_run()
+        try:
+            self._op.commit()
+        except:
+            raise DwarfInfoParseAfterError("Error when commit {}")
 
 
-class DwarfFormat:
-    def __init__(self, file_path, db_path):
-        self._elffile = ELFFile(open(file_path, 'rb'))
-        self._file_path = file_path
-        self._dwarfinfo = None
-        self.db_path = db_path
-        self.cache = DwarfInfoCache(file_path)
-        self.prepare()
-        self._op_list = list()
-
-    def has_debug_info(self):
-        return self._elffile.has_dwarf_info()
-
-    def prepare(self):
-        if self._dwarfinfo is None:
-            self._dwarfinfo = self._elffile.get_dwarf_info()
-
-    def _parser_helper(self, num):
-        op = Operation()
-        self._op_list.append(op)
-        parser = DwarfFormatParser(self.cache, num, op)
-        return parser.parse()
-
-    def parse(self, concurrency_level=2):
-        Operation.prepare(self.db_path)
-        cus = list(self.cache.get_cu_list())
-        self.cache.get_cu_list()
-        i = len(cus)
-        with PoolExecutor(max_workers=concurrency_level) as executor:
-            mapper = {executor.submit(self._parser_helper, [n]): n for n in range(len(cus))}
-            for f in as_completed(mapper):
-                try:
-                    f.result()
-                except Exception as e:
-                    raise
-                else:
-                    sys.stdout.write('\r                                                            \r')
-                    sys.stdout.write('%d unit processed, %d remained, progress:%d%%' %
-                                     (mapper[f], i, 100 - (i * 100 / len(cus))))
-                    sys.stdout.flush()
-                finally:
-                    i -= 1
-            print('')
-        i = len(self._op_list)
-        sys.stdout.write('Committing to database!\n')
-        for op in self._op_list:
-            sys.stdout.write('\r                                                            \r')
-            sys.stdout.write('%d unit committed, %d remained, progress: %d%% ' %
-                             (len(self._op_list) - i, i, 100 - (i * 100 / len(self._op_list))))
-            i -= 1
-            sys.stdout.flush()
-            op.commit()
-        print('')
-
-
-class DwarfInfoParseError(Exception):
+class DwarfMacroBeforeParseError(Exception):
     pass
 
 
-class DwarfInfoParseTask(Task):
-    def __init__(self, cu,  op, file_path, comp_path = None):
-        super(DwarfInfoParseTask, self).__init__()
-        self.cu = cu
-        self.comp_path = comp_path
-        self.op = op
-        self.file_path = file_path
-        self.file_mapper = None
-        self.elf_file = None
+class DwarfMacroParseError(Exception):
+    pass
+
+
+class DwarfMacroParseAfterError(Exception):
+    pass
+
+
+class DwarfMacroParseTask(Task):
+    def __init__(self, macro: Macro, cu_index_list: list, file_map_list: list, op: Operation):
+        self._macro = macro
+        self._op = op
+        self._cu_id_list = cu_index_list
+        self._file_map_list = file_map_list
 
     def _before_run(self):
-        if not os.path.exists(self.file_path):
-            raise DwarfInfoParseError("Binary file not found")
+        super(DwarfMacroParseTask, self)._before_run()
+        pass
 
+    def _run(self):
+        macro_list = self._macro.get_macro_list()
+        cu_list_index = 0
+        for macro_list_item in macro_list:
+            assert cu_list_index < len(self._cu_id_list)
+            cu_id = self._cu_id_list[cu_list_index]
+            file_map = self._file_map_list[cu_list_index]
+            for item in macro_list_item:
+                if item.file_idx <= 0:
+                    continue
+                tag = Tag()
+                tag.file = file_map[item.file_idx]
+                tag.compile_unit_id = cu_id
+                tag.line_no = item.line_num
+                tag.name = item.macro_name
+                tag.type = TagType.Macro
+                self._op.add_tag(tag)
+            cu_list_index += 1
+
+    def _after_run(self):
+        super(DwarfMacroParseTask, self)._after_run()
+        self._op.commit()
+
+
+class DwarfParseTaskGenerateError(Exception):
+    pass
+
+
+FileMapTuple = namedtuple('FileMapTuple', 'dir_rel_path file_rel_path')
+
+
+class DwarfParseTaskGenerator:
+    def __init__(self, file_path):
+        self._file_path = file_path
+        self._elf_file = ELFFile(open(file_path, 'rb'))
+
+    @staticmethod
+    def _get_file_map(op, cu: CompileUnit):
+        line_program = cu.dwarfinfo.line_program_for_CU(cu)
+        index = 1
+        file_map = dict()
+        for file_entry in line_program['file_entry']:
+            file_name = bytes2str(file_entry.name)
+            dir_index = file_entry.dir_index
+            if dir_index > 0:
+                dir_path = line_program['include_directory'][dir_index - 1]
+            else:
+                dir_path = b'.'
+            file_map[index] = op.add_file(file_name, bytes2str(dir_path))
+            index += 1
+        op.commit()
+        return file_map
+
+    def has_debug_info(self):
+        return self._elf_file.has_dwarf_info()
+
+    def iter_tasks(self):
+        if not self.has_debug_info():
+            raise DwarfParseTaskGenerateError("Cannot find debug info")
+
+        dwarf_info = self._elf_file.get_dwarf_info()
+        DwarfInfoParseTask.set_dwarf_info_buffer(dwarf_info)
+
+        macro_cu_list = list()
+        macro_file_map_list = list()
+        cu_id = 0
+        for cu in dwarf_info.iter_CUs():
+            file_map = self._get_file_map(Operation(), cu)
+            yield DwarfInfoParseTask(cu, Operation(), file_map, cu_id)
+            if 'DW_AT_macro_info' in cu.get_top_DIE().attributes:
+                macro_cu_list.append(cu_id)
+                macro_file_map_list.append(file_map)
+            cu_id += 1
+
+        yield DwarfMacroParseTask(
+            Macro.get_macro_info_from_elffile(self._elf_file), macro_cu_list, macro_file_map_list, Operation()
+        )

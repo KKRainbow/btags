@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 import os
 from os.path import dirname
-
-from debuginfo.dwarfformat import DwarfFormat
+from debuginfo.runner import Runner
+from debuginfo.dwarfformat import DwarfParseTaskGenerator
+from db.operation import Operation
 from tagfile.ctag import CtagFormat
 import argparse as ap
 
 if __name__ == '__main__':
     debug_info_mapper = {
-        'dwarf': DwarfFormat
+        'dwarf': DwarfParseTaskGenerator
     }
     tag_format_mapper = {
         'ctag': CtagFormat
@@ -25,7 +26,7 @@ if __name__ == '__main__':
     parser. \
         add_argument('-t', '--tag-file', default='./tags', help='Save path of generated tag file')
     parser. \
-        add_argument('-d', '--database-file', default='./tag.sqlite',
+        add_argument('-d', '--database-file', default='{}/tag.sqlite'.format(os.getcwd()),
                      help='The directory where the tag info database will be placed')
     parser.\
         add_argument('-o', '--only-database', help='Only generate tag info database, do not generate tag file',
@@ -68,7 +69,7 @@ if __name__ == '__main__':
         if os.path.exists(db_path):
             os.remove(db_path)
 
-    df = debug_info_mapper[nb.debug_info_format](bin_path, db_path)
+    df = debug_info_mapper[nb.debug_info_format](bin_path)
     if not df.has_debug_info():
         print('No debug info found in binary file.')
         exit()
@@ -78,7 +79,8 @@ if __name__ == '__main__':
             print('No database found, generating...')
         else:
             print('Generating tag info databases...')
-        df.parse(nb.jobs)
+        Operation.prepare(db_path)
+        Runner(df, nb.jobs).run()
 
     if nb.only_database:
         exit()
