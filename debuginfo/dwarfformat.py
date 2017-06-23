@@ -63,30 +63,30 @@ class DwarfInfoParseTask(Task):
         cls._dwarf_info_bytes = None
         cls._dwarf_line_bytes = None
 
-    __slots__ = ["_cu", "_op", "_dwarf_info", "_file_map", "_cu_db_item"]
+    __slots__ = ["_cu", "_op", "_dwarf_info", "_file_id_map", "_cu_db_item"]
 
-    def __init__(self, cu: CompileUnit,  op: Operation, file_map: dict, index: int):
+    def __init__(self, cu: CompileUnit, file_id_map: dict, index: int):
         super(DwarfInfoParseTask, self).__init__()
         self._cu = cu
-        self._op = op
+        self._op = Operation()
         self._dwarf_info = None
         self.index = index
-        self._file_map = file_map
+        self._file_id_map = file_id_map
         self._cu_db_item = None
 
     def _before_run(self):
         super(DwarfInfoParseTask, self)._before_run()
-        if len(self._dwarf_info_bytes) == 0:
+        if len(DwarfInfoParseTask._dwarf_info_bytes) == 0:
             raise DwarfInfoBeforeParseError("Bytes of info section is empty")
-        if len(self._dwarf_line_bytes) == 0:
+        if len(DwarfInfoParseTask._dwarf_line_bytes) == 0:
             raise DwarfInfoBeforeParseError("Bytes of line section is empty")
-        if self._file_map is None:
+        if self._file_id_map is None:
             raise DwarfInfoBeforeParseError("No file map found")
 
         self._cu.dwarfinfo.debug_info_sec = \
-            self._cu.dwarfinfo.debug_info_sec._replace(stream=BytesIO(self._dwarf_info_bytes))
+            self._cu.dwarfinfo.debug_info_sec._replace(stream=BytesIO(DwarfInfoParseTask._dwarf_info_bytes))
         self._cu.dwarfinfo.debug_line_sec = \
-            self._cu.dwarfinfo.debug_line_sec._replace(stream=BytesIO(self._dwarf_line_bytes))
+            self._cu.dwarfinfo.debug_line_sec._replace(stream=BytesIO(DwarfInfoParseTask._dwarf_line_bytes))
 
         global_offset = self._cu.dwarfinfo.debug_info_sec.global_offset
         if global_offset == 0:
@@ -114,7 +114,7 @@ class DwarfInfoParseTask(Task):
         self._cu_db_item = self._op.add_compilation_unit(cu_file_directory, cu_file_name, self.index)
 
     def _run(self):
-        file_map = self._file_map
+        file_id_map = self._file_id_map
         tag_stack = [(self._cu.get_top_DIE(), Tag())]
         tag_to_add = []
         tag_map = dict()
@@ -151,8 +151,8 @@ class DwarfInfoParseTask(Task):
 
                 if tag.type != TagType.EnumerationMember:
                     tag.line_no = int(attributes['DW_AT_decl_line']) if tag.type != TagType.BaseType else None
-                    tag.file = file_map[int(attributes['DW_AT_decl_file'])] \
-                        if tag.type != TagType.BaseType else file_map[1]
+                    tag.file_id = file_id_map[int(attributes['DW_AT_decl_file'])] \
+                        if tag.type != TagType.BaseType else file_id_map[1]
 
                 if tag.type in [TagType.Typedef] and 'DW_AT_type' in attributes.keys():
                     to_type = attributes['DW_AT_type']
@@ -184,7 +184,7 @@ class DwarfInfoParseTask(Task):
                     """
                     tmp_tag = tag.tmp_assoc_to_tag
                     while tmp_tag is not None and tmp_tag.file is None:
-                        tmp_tag = tag.parent_tag
+                        tmp_tag = tmp_tag.parent_tag
                     if tmp_tag is not None:
                         tag.file = tmp_tag.file
 
@@ -217,11 +217,12 @@ class DwarfInfoParseTask(Task):
             self._op.add_tag(tag)
 
     def _after_run(self):
-        super(DwarfInfoParseTask, self)._after_run()
         try:
             self._op.commit()
         except:
             raise DwarfInfoParseAfterError("Error when commit {}")
+        self._op.close()
+        super(DwarfInfoParseTask, self)._after_run()
 
 
 class DwarfMacroBeforeParseError(Exception):
@@ -237,11 +238,11 @@ class DwarfMacroParseAfterError(Exception):
 
 
 class DwarfMacroParseTask(Task):
-    def __init__(self, macro: Macro, cu_index_list: list, file_map_list: list, op: Operation):
+    def __init__(self, macro: Macro, cu_index_list: list, file_id_map_list: list):
         self._macro = macro
-        self._op = op
+        self._op = Operation()
         self._cu_id_list = cu_index_list
-        self._file_map_list = file_map_list
+        self._file_id_map_list = file_id_map_list
 
     def _before_run(self):
         super(DwarfMacroParseTask, self)._before_run()
@@ -253,22 +254,23 @@ class DwarfMacroParseTask(Task):
         for macro_list_item in macro_list:
             assert cu_list_index < len(self._cu_id_list)
             cu_id = self._cu_id_list[cu_list_index]
-            file_map = self._file_map_list[cu_list_index]
+            file_id_map = self._file_id_map_list[cu_list_index]
             for item in macro_list_item:
                 if item.file_idx <= 0:
                     continue
                 tag = Tag()
-                tag.file = file_map[item.file_idx]
+                tag.file_id = file_id_map[item.file_idx]
                 tag.compile_unit_id = cu_id
                 tag.line_no = item.line_num
                 tag.name = item.macro_name
                 tag.type = TagType.Macro
                 self._op.add_tag(tag)
             cu_list_index += 1
+            self._op.commit()
 
     def _after_run(self):
+        self._op.close()
         super(DwarfMacroParseTask, self)._after_run()
-        self._op.commit()
 
 
 class DwarfParseTaskGenerateError(Exception):
@@ -284,7 +286,7 @@ class DwarfParseTaskGenerator:
         self._elf_file = ELFFile(open(file_path, 'rb'))
 
     @staticmethod
-    def _get_file_map(op, cu: CompileUnit):
+    def _get_file_id_map(cu: CompileUnit, op: Operation):
         line_program = cu.dwarfinfo.line_program_for_CU(cu)
         index = 1
         file_map = dict()
@@ -297,8 +299,10 @@ class DwarfParseTaskGenerator:
                 dir_path = b'.'
             file_map[index] = op.add_file(file_name, bytes2str(dir_path))
             index += 1
-        op.commit()
-        return file_map
+        file_id_map = dict()
+        for key in file_map:
+            file_id_map[key] = file_map[key].id
+        return file_id_map
 
     def has_debug_info(self):
         return self._elf_file.has_dwarf_info()
@@ -311,16 +315,21 @@ class DwarfParseTaskGenerator:
         DwarfInfoParseTask.set_dwarf_info_buffer(dwarf_info)
 
         macro_cu_list = list()
-        macro_file_map_list = list()
+        macro_file_id_map_list = list()
         cu_id = 0
-        for cu in dwarf_info.iter_CUs():
-            file_map = self._get_file_map(Operation(), cu)
-            yield DwarfInfoParseTask(cu, Operation(), file_map, cu_id)
+
+        op = Operation()
+        cus = list(dwarf_info.iter_CUs())
+        file_id_maps = [DwarfParseTaskGenerator._get_file_id_map(cu, op) for cu in cus]
+        op.commit()
+        op.close()
+        for cu, file_id_map in zip(cus, file_id_maps):
+            yield DwarfInfoParseTask(cu, file_id_map, cu_id)
             if 'DW_AT_macro_info' in cu.get_top_DIE().attributes:
                 macro_cu_list.append(cu_id)
-                macro_file_map_list.append(file_map)
+                macro_file_id_map_list.append(file_id_map)
             cu_id += 1
 
         yield DwarfMacroParseTask(
-            Macro.get_macro_info_from_elffile(self._elf_file), macro_cu_list, macro_file_map_list, Operation()
+            Macro.get_macro_info_from_elffile(self._elf_file), macro_cu_list, macro_file_id_map_list
         )

@@ -29,7 +29,10 @@ class Runner:
         self.task_submitted = list()
 
     def submit_task(self, executor: PoolExecutor):
+        i = 0
         for task in self.task_generator.iter_tasks():
+            i += 1
+            print("{} tasks submitted!".format(i))
             self.task_submitted.append(executor.submit(task.start))
 
     def run(self):
@@ -48,6 +51,6 @@ class Runner:
                 except:
                     raise
                 else:
-                    print("{0} task remain...\r                          \r")
+                    print("{0} task remain...".format(i))
                 finally:
                     i -= 1

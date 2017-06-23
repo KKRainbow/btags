@@ -3,22 +3,31 @@ from os.path import basename, dirname, normpath
 import os
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy import create_engine
+from threading import Lock
+from sqlalchemy import event
 
 
 class Operation:
-    Session = None
     engine = None
+    file_id_counter = 0
+    file_id_lock = Lock()
     @classmethod
     def prepare(cls, db_path):
         if cls.engine is None:
-            cls.engine = create_engine('sqlite:///' + db_path, echo=False)
+            cls.engine = create_engine('sqlite:///' + db_path, echo=False, connect_args={'timeout': 3600})
             if db_path == ':memory:' or not os.path.exists(db_path):
                 Base.metadata.create_all(cls.engine)
-        session_factory = sessionmaker(bind=cls.engine)
-        cls.Session = scoped_session(session_factory)
+        event.listen(cls.engine, 'connect', Operation._set_no_synchronous)
+
+    @staticmethod
+    def _set_no_synchronous(dbapi_con, con_record):
+        dbapi_con.execute('PRAGMA synchronous=OFF')
+        dbapi_con.execute('PRAGMA journal_mode=OFF')
+        dbapi_con.execute('PRAGMA temp_store=MEMORY')
 
     def __init__(self):
-        self._session = Operation.Session()
+        self._scoped_session = scoped_session(sessionmaker(bind=self.engine))
+        self._session = self._scoped_session()
         self._file = None
         self._tags = []
 
@@ -40,6 +49,9 @@ class Operation:
         file = File()
         file_path = "{}/{}".format(dir_reltocompdir, filename)
         path = normpath(file_path)
+        with Operation.file_id_lock:
+            Operation.file_id_counter += 1
+            file.id = Operation.file_id_counter
         file.file_name = basename(path)
         file.file_directory = dirname(path)
         file.file_dir_rel_to_comp_dir = dir_reltocompdir
@@ -48,6 +60,9 @@ class Operation:
 
     def commit(self):
         self._session.commit()
+
+    def close(self):
+        self._scoped_session.remove()
 
     def session(self):
         return self._session
