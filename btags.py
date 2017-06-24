@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-import os
+import os, sys
 from os.path import dirname
 from debuginfo.runner import Runner
 from debuginfo.dwarfformat import DwarfParseTaskGenerator
 from db.operation import Operation
 from tagfile.ctag import CtagFormat
 import argparse as ap
+from terminal.statusbar import MultiProgressBar
 
 if __name__ == '__main__':
     debug_info_mapper = {
@@ -69,7 +70,7 @@ if __name__ == '__main__':
         if os.path.exists(db_path):
             os.remove(db_path)
 
-    df = debug_info_mapper[nb.debug_info_format](bin_path)
+    df = debug_info_mapper[nb.debug_info_format](bin_path, MultiProgressBar(nb.jobs, "Task ", sys.stdout))
     if not df.has_debug_info():
         print('No debug info found in binary file.')
         exit()

@@ -1,15 +1,42 @@
 from elftools.elf.elffile import ELFFile, DWARFInfo
 from elftools.common.py3compat import BytesIO
 from elftools.dwarf.compileunit import CompileUnit
-from os.path import sep, normpath
+from os.path import sep
 from elftools.dwarf.descriptions import describe_attr_value
 from elftools.common.py3compat import bytes2str
 from db.operation import *
 from collections import defaultdict, namedtuple
 from elftoolsext.macro import Macro
 from .runner import Task
-
+from terminal.statusbar import MultiProgressBar
 import sys
+
+
+def get_status_bar_decorator(status_bar: MultiProgressBar, index: int):
+    """
+    use as following:
+        >>> your_status_bar = MultiProgressBar()
+        >>> your_decorator = get_status_bar_decorator(your_status_bar)
+        >>> base, span, total_step, message = 0.5, 0.2, 1000, "Your Message {0} {1}"
+        >>> @your_decorator(base, span, total_step, message)
+        >>> def your_step_func(arg1, arg2, arg3):
+        >>>     "Do something"
+    this assume your step function will be called *total_step* times
+    :param status_bar: MultiProgressBar
+    :param index:int
+    :return: int
+    """
+    def decorator_generator(base, span, total_step, message: str):
+        cur_step = [0]
+
+        def wrapper(step_func, *args):
+            cur_step[0] += 1
+            status_bar.update(index, (cur_step[0] / total_step) * span + base,
+                              message.format(cur_step, total_step))
+            step_func(*args)
+        return wrapper
+    return decorator_generator
+
 
 
 class TagMapperError(Exception):
@@ -63,9 +90,9 @@ class DwarfInfoParseTask(Task):
         cls._dwarf_info_bytes = None
         cls._dwarf_line_bytes = None
 
-    __slots__ = ["_cu", "_op", "_dwarf_info", "_file_id_map", "_cu_db_item"]
+    __slots__ = ["_cu", "_op", "_dwarf_info", "_file_id_map", "_cu_db_item", "_status_bar"]
 
-    def __init__(self, cu: CompileUnit, file_id_map: dict, index: int):
+    def __init__(self, cu: CompileUnit, file_id_map: dict, index: int, status_bar: MultiProgressBar):
         super(DwarfInfoParseTask, self).__init__()
         self._cu = cu
         self._op = Operation()
@@ -73,6 +100,8 @@ class DwarfInfoParseTask(Task):
         self.index = index
         self._file_id_map = file_id_map
         self._cu_db_item = None
+        self._status_bar = status_bar
+        self._status_bar_index = None
 
     def _before_run(self):
         super(DwarfInfoParseTask, self)._before_run()
@@ -112,6 +141,8 @@ class DwarfInfoParseTask(Task):
             sys.stderr.write("Warning: file {} doesn't exist!\n".format(file_full_path))
 
         self._cu_db_item = self._op.add_compilation_unit(cu_file_directory, cu_file_name, self.index)
+        self._status_bar_index = self._status_bar.get_an_index()
+        self._status_bar_decorator = get_status_bar_decorator(self._status_bar, self._status_bar_index)
 
     def _run(self):
         file_id_map = self._file_id_map
@@ -119,6 +150,10 @@ class DwarfInfoParseTask(Task):
         tag_to_add = []
         tag_map = dict()
 
+        die_iter = self._cu.iter_DIEs()
+        die_len = len(self._cu._dielist)
+
+        @self._status_bar_decorator(0, 0.5, die_len, "Parsing tags {0}/{1}")
         def parse_tags(die):
             tag_mapper_key = '<0x%x>' % die.offset
             try:
@@ -196,7 +231,6 @@ class DwarfInfoParseTask(Task):
                     tag_stack.append((die, tag))
                 elif die.is_null():
                     tag_stack.pop()
-        die_iter = self._cu.iter_DIEs()
         top = True
         for cur_die in die_iter:
             if top:
@@ -206,21 +240,28 @@ class DwarfInfoParseTask(Task):
                 parse_tags(cur_die)
 
         # fold the tags
-        for tag in tag_to_add:
-            tmp_tag = tag.tmp_assoc_to_tag
+        @self._status_bar_decorator(0.5, 0.3, len(tag_to_add), "Folding tags {0}/{1}")
+        def fold_tags(cur_tag):
+            tmp_tag = cur_tag.tmp_assoc_to_tag
             while tmp_tag is not None:
                 if tmp_tag.name is not None:
                     break
                 else:
                     tmp_tag = tmp_tag.assoc_to_tag
-            tag.assoc_to_tag = tmp_tag
-            self._op.add_tag(tag)
+            cur_tag.assoc_to_tag = tmp_tag
+            self._op.add_tag(cur_tag)
+        for tag in tag_to_add:
+            fold_tags(tag)
 
     def _after_run(self):
         try:
+            self._status_bar.update(self._status_bar_index, 0.8, "Committing tags to database")
             self._op.commit()
+            self._status_bar.update(self._status_bar_index, 1, "Tags committed")
         except:
             raise DwarfInfoParseAfterError("Error when commit {}")
+        finally:
+            self._status_bar.return_an_index(self._status_bar_index)
         self._op.close()
         super(DwarfInfoParseTask, self)._after_run()
 
@@ -238,15 +279,17 @@ class DwarfMacroParseAfterError(Exception):
 
 
 class DwarfMacroParseTask(Task):
-    def __init__(self, macro: Macro, cu_index_list: list, file_id_map_list: list):
+    def __init__(self, macro: Macro, cu_index_list: list, file_id_map_list: list, status_bar: MultiProgressBar):
         self._macro = macro
         self._op = Operation()
         self._cu_id_list = cu_index_list
         self._file_id_map_list = file_id_map_list
+        self._status_bar = status_bar
 
     def _before_run(self):
         super(DwarfMacroParseTask, self)._before_run()
-        pass
+        self._status_bar_index = self._status_bar.get_an_index()
+        self._status_bar_decorator = get_status_bar_decorator(self._status_bar, self._status_bar_index)
 
     def _run(self):
         macro_list = self._macro.get_macro_list()
@@ -255,9 +298,15 @@ class DwarfMacroParseTask(Task):
             assert cu_list_index < len(self._cu_id_list)
             cu_id = self._cu_id_list[cu_list_index]
             file_id_map = self._file_id_map_list[cu_list_index]
-            for item in macro_list_item:
+
+            @self._status_bar_decorator(
+                0, 0.8, len(macro_list_item),
+                "Parsing tags for compile unit %d/%d progress: {0}/{1}" % (cu_list_index, len(self._cu_id_list))
+            )
+            def parse_macro_list_item(item):
+                self._status_bar.update(self._status_bar_index, 1, "Done")
                 if item.file_idx <= 0:
-                    continue
+                    return
                 tag = Tag()
                 tag.file_id = file_id_map[item.file_idx]
                 tag.compile_unit_id = cu_id
@@ -265,10 +314,15 @@ class DwarfMacroParseTask(Task):
                 tag.name = item.macro_name
                 tag.type = TagType.Macro
                 self._op.add_tag(tag)
+            for item in macro_list_item:
+                parse_macro_list_item(item)
             cu_list_index += 1
+            self._status_bar.update(self._status_bar_index, 0.8, "Committing macro tags for cu %d" % cu_id)
             self._op.commit()
 
     def _after_run(self):
+        self._status_bar.update(self._status_bar_index, 1, "Done")
+        self._status_bar.return_an_index(self._status_bar_index)
         self._op.close()
         super(DwarfMacroParseTask, self)._after_run()
 
@@ -281,9 +335,10 @@ FileMapTuple = namedtuple('FileMapTuple', 'dir_rel_path file_rel_path')
 
 
 class DwarfParseTaskGenerator:
-    def __init__(self, file_path):
+    def __init__(self, file_path, status_bar: MultiProgressBar):
         self._file_path = file_path
         self._elf_file = ELFFile(open(file_path, 'rb'))
+        self._status_bar = status_bar
 
     @staticmethod
     def _get_file_id_map(cu: CompileUnit, op: Operation):
@@ -313,23 +368,49 @@ class DwarfParseTaskGenerator:
 
         dwarf_info = self._elf_file.get_dwarf_info()
         DwarfInfoParseTask.set_dwarf_info_buffer(dwarf_info)
+        status_bar_index = self._status_bar.get_an_index()
 
         macro_cu_list = list()
         macro_file_id_map_list = list()
         cu_id = 0
 
         op = Operation()
-        cus = list(dwarf_info.iter_CUs())
-        file_id_maps = [DwarfParseTaskGenerator._get_file_id_map(cu, op) for cu in cus]
+        cus = list()
+        file_id_maps = list()
+        cu_index = 0
+        cu_offset = 0
+        for cu in dwarf_info.iter_CUs():
+            cu_index += 1
+            cus.append(cu)
+            file_id_maps.append(DwarfParseTaskGenerator._get_file_id_map(cu, op))
+            cu_offset += cu['unit_length'] + cu.structs.initial_length_field_size()
+            self._status_bar.update(
+                status_bar_index,
+                (cu_offset / dwarf_info.debug_info_sec.size) * 0.5,
+                "Processing compile unit and file map {} / {}".format(
+                    cu_offset,
+                    dwarf_info.debug_info_sec.size
+                )
+            )
+
+        self._status_bar.update(status_bar_index, 0.5, "Committing file map...")
+
         op.commit()
         op.close()
+
+        self._status_bar.update(status_bar_index, 0.9, "File map committed...")
+
         for cu, file_id_map in zip(cus, file_id_maps):
-            yield DwarfInfoParseTask(cu, file_id_map, cu_id)
+            self._status_bar.update(status_bar_index, 0.9 + (cu_id / len(cus)) * 0.1, "Generating tasks {}...".format(cu_id))
+            yield DwarfInfoParseTask(cu, file_id_map, cu_id, self._status_bar)
             if 'DW_AT_macro_info' in cu.get_top_DIE().attributes:
                 macro_cu_list.append(cu_id)
                 macro_file_id_map_list.append(file_id_map)
             cu_id += 1
 
+        self._status_bar.update(status_bar_index, 1, "Generating tasks {}...".format(cu_id + 1))
         yield DwarfMacroParseTask(
-            Macro.get_macro_info_from_elffile(self._elf_file), macro_cu_list, macro_file_id_map_list
+            Macro.get_macro_info_from_elffile(self._elf_file), macro_cu_list, macro_file_id_map_list, self._status_bar
         )
+        self._status_bar.update(status_bar_index, 1, "Done")
+        self._status_bar.return_an_index(status_bar_index)
