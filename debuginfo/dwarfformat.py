@@ -29,12 +29,14 @@ def get_status_bar_decorator(status_bar: MultiProgressBar, index: int):
     def decorator_generator(base, span, total_step, message: str):
         cur_step = [0]
 
-        def wrapper(step_func, *args):
-            cur_step[0] += 1
-            status_bar.update(index, (cur_step[0] / total_step) * span + base,
-                              message.format(cur_step, total_step))
-            step_func(*args)
-        return wrapper
+        def decorator(step_func):
+            def wrapper(*args):
+                cur_step[0] += 1
+                status_bar.update(index, (cur_step[0] / total_step) * span + base,
+                                  message.format(cur_step, total_step))
+                step_func(*args)
+            return wrapper
+        return decorator
     return decorator_generator
 
 

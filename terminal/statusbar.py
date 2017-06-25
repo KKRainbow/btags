@@ -47,6 +47,7 @@ class ProgressBar:
             bar.encode() +
             self.term.CLEAR_EOL + message.center(self.width).encode()
         )
+        self.out.flush()
 
     def clear(self):
         if not self.cleared:
@@ -58,6 +59,8 @@ class ProgressBar:
 
 class MultiProgressBar:
     def __init__(self, bar_count, bar_name_prefix, out):
+        os.system("stty -echo -icanon")
+        os.system("tput civis")
         self._term = TerminalController()
         self._bar_count = bar_count
         self._out = out
@@ -69,15 +72,17 @@ class MultiProgressBar:
         self._bar_end_lines = list()
         for i in range(1, bar_count + 1):
             self._bar.append(ProgressBar(self._term, "{}{}".format(bar_name_prefix, i), out))
+            self._out.flush()
             self._bar_end_lines.append(self._term.LINES - 3 * (bar_count - i))
 
     def _set_pos_to_bar(self, index):
-        self._term.set_pos(self._bar_end_lines[index], 1)
+        self._out.write(self._term.set_pos(self._bar_end_lines[index], 1))
 
     def update(self, index, percent, message):
         assert percent <= 1
         with self._out_lock:
             self._set_pos_to_bar(index)
+            self._out.flush()
             self._bar[index].update(percent, message)
 
     def get_an_index(self):
@@ -88,12 +93,14 @@ class MultiProgressBar:
                 if self.last_allocated_index not in self.allocated_index:
                     self.allocated_index.add(self.last_allocated_index)
                     return self.last_allocated_index
-        print("get thread id %d", current_thread().getName())
         assert False
         return -1
 
     def return_an_index(self, index):
-        print("return thread id %d", current_thread().getName())
         with self.index_lock:
             assert index in self.allocated_index
             self.allocated_index.remove(index)
+
+    def __del__(self):
+        os.system("stty echo icanon")
+        os.system("tput cnorm")

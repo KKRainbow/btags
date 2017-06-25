@@ -77,9 +77,11 @@ if __name__ == '__main__':
 
     if not os.path.exists(db_path):
         if not nb.new_db:
-            print('No database found, generating...')
+            pass
+            #print('No database found, generating...')
         else:
-            print('Generating tag info databases...')
+            pass
+            #print('Generating tag info databases...')
         Operation.prepare(db_path)
         Runner(df, nb.jobs).run()
 

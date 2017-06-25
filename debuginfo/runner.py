@@ -1,5 +1,6 @@
 from concurrent.futures.thread import ThreadPoolExecutor as PoolExecutor
 from concurrent.futures import as_completed
+import signal
 
 
 class Task:
@@ -36,6 +37,11 @@ class Runner:
 
     def run(self):
         with PoolExecutor(max_workers=self._concurrency_level) as executor:
+            def interrupt_handler(signal, frame):
+                import os
+                os.system("tput cnorm")
+                raise KeyboardInterrupt()
+            signal.signal(signal.SIGINT, interrupt_handler)
             add_task_future = executor.submit(self.submit_task, executor)
             try:
                 add_task_future.result()
