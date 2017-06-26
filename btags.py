@@ -70,20 +70,15 @@ if __name__ == '__main__':
         if os.path.exists(db_path):
             os.remove(db_path)
 
-    df = debug_info_mapper[nb.debug_info_format](bin_path, MultiProgressBar(nb.jobs, "Task ", sys.stdout))
+    status_bar = MultiProgressBar(nb.jobs + 1, "Task ", sys.stdout)
+    df = debug_info_mapper[nb.debug_info_format](bin_path, status_bar)
     if not df.has_debug_info():
         print('No debug info found in binary file.')
         exit()
 
     if not os.path.exists(db_path):
-        if not nb.new_db:
-            pass
-            #print('No database found, generating...')
-        else:
-            pass
-            #print('Generating tag info databases...')
         Operation.prepare(db_path)
-        Runner(df, nb.jobs).run()
+        Runner(df, nb.jobs, status_bar).run()
 
     if nb.only_database:
         exit()

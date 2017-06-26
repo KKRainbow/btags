@@ -104,3 +104,38 @@ class MultiProgressBar:
     def __del__(self):
         os.system("stty echo icanon")
         os.system("tput cnorm")
+
+
+def get_status_bar_decorator(status_bar: MultiProgressBar, index: int):
+    """
+    use as following:
+        >>> your_status_bar = MultiProgressBar()
+        >>> your_decorator = get_status_bar_decorator(your_status_bar)
+        >>> base, span, total_step, message = 0.5, 0.2, 1000, "Your Message {0} {1}"
+        >>> @your_decorator(base, span, total_step, message)
+        >>> def your_step_func(arg1, arg2, arg3):
+        >>>     "Do something"
+    this assume your step function will be called *total_step* times
+    :param status_bar: MultiProgressBar
+    :param index:int
+    :return: int
+    """
+    def decorator_generator(base, span, total_step, message: str):
+        cur_step = [0]
+
+        def decorator(step_func):
+            mydiv = pow(10, len(str(total_step)) - 2)
+            if mydiv < 10:
+                mydiv = 1
+
+            def wrapper(*args):
+                cur_step[0] += 1
+                if cur_step[0] % mydiv == 0 or total_step - cur_step[0] <= mydiv:
+                    status_bar.update(index, (cur_step[0] / total_step) * span + base,
+                                      message.format(cur_step, total_step))
+                step_func(*args)
+            return wrapper
+        return decorator
+    return decorator_generator
+
+

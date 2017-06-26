@@ -8,36 +8,8 @@ from db.operation import *
 from collections import defaultdict, namedtuple
 from elftoolsext.macro import Macro
 from .runner import Task
-from terminal.statusbar import MultiProgressBar
+from terminal.statusbar import MultiProgressBar, get_status_bar_decorator
 import sys
-
-
-def get_status_bar_decorator(status_bar: MultiProgressBar, index: int):
-    """
-    use as following:
-        >>> your_status_bar = MultiProgressBar()
-        >>> your_decorator = get_status_bar_decorator(your_status_bar)
-        >>> base, span, total_step, message = 0.5, 0.2, 1000, "Your Message {0} {1}"
-        >>> @your_decorator(base, span, total_step, message)
-        >>> def your_step_func(arg1, arg2, arg3):
-        >>>     "Do something"
-    this assume your step function will be called *total_step* times
-    :param status_bar: MultiProgressBar
-    :param index:int
-    :return: int
-    """
-    def decorator_generator(base, span, total_step, message: str):
-        cur_step = [0]
-
-        def decorator(step_func):
-            def wrapper(*args):
-                cur_step[0] += 1
-                status_bar.update(index, (cur_step[0] / total_step) * span + base,
-                                  message.format(cur_step, total_step))
-                step_func(*args)
-            return wrapper
-        return decorator
-    return decorator_generator
 
 
 
@@ -303,10 +275,9 @@ class DwarfMacroParseTask(Task):
 
             @self._status_bar_decorator(
                 0, 0.8, len(macro_list_item),
-                "Parsing tags for compile unit %d/%d progress: {0}/{1}" % (cu_list_index, len(self._cu_id_list))
+                "Parsing macro tags for compile unit %d/%d progress: {0}/{1}" % (cu_list_index, len(self._cu_id_list))
             )
             def parse_macro_list_item(item):
-                self._status_bar.update(self._status_bar_index, 1, "Done")
                 if item.file_idx <= 0:
                     return
                 tag = Tag()
