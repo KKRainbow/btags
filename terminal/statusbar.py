@@ -1,6 +1,6 @@
 from .terminalcontroller import TerminalController
 from threading import Lock, current_thread
-import os
+import os, signal
 #######################################################################
 # Example use case: progress bar
 #######################################################################
@@ -61,7 +61,15 @@ class MultiProgressBar:
     def __init__(self, bar_count, bar_name_prefix, out):
         os.system("stty -echo -icanon")
         os.system("tput civis")
-        self._term = TerminalController()
+        self._prev_handler = signal.getsignal(signal.SIGINT)
+
+        def interrupt_handler(signal, frame):
+            import os
+            os.system("stty echo icanon")
+            os.system("tput cnorm")
+            raise KeyboardInterrupt()
+        signal.signal(signal.SIGINT, interrupt_handler)
+        self.term = TerminalController()
         self._bar_count = bar_count
         self._out = out
         self._out_lock = Lock()
@@ -71,12 +79,17 @@ class MultiProgressBar:
         self._bar = list()
         self._bar_end_lines = list()
         for i in range(1, bar_count + 1):
-            self._bar.append(ProgressBar(self._term, "{}{}".format(bar_name_prefix, i), out))
+            self._bar.append(ProgressBar(self.term, "{}{}".format(bar_name_prefix, i), out))
+            self._bar_end_lines.append(self.term.LINES - 4 * (bar_count - i) - 3)
             self._out.flush()
-            self._bar_end_lines.append(self._term.LINES - 3 * (bar_count - i))
+            self._out.write(self.term.DOWN.decode())
+            self._out.write(self.term.DOWN.decode())
+            self._out.flush()
+        self._out.write(self.term.DOWN.decode())
+        self._out.flush()
 
     def _set_pos_to_bar(self, index):
-        self._out.write(self._term.set_pos(self._bar_end_lines[index], 1))
+        self._out.write(self.term.set_pos(self._bar_end_lines[index], 1))
 
     def update(self, index, percent, message):
         assert percent <= 1
@@ -94,7 +107,6 @@ class MultiProgressBar:
                     self.allocated_index.add(self.last_allocated_index)
                     return self.last_allocated_index
         assert False
-        return -1
 
     def return_an_index(self, index):
         with self.index_lock:
@@ -104,6 +116,21 @@ class MultiProgressBar:
     def __del__(self):
         os.system("stty echo icanon")
         os.system("tput cnorm")
+
+    def info(self, index, str, color=None):
+        if color is None:
+            color = self.term.NORMAL
+        with self._out_lock:
+            self._out.write(
+                self.term.set_pos(
+                    self._bar_end_lines[index] + 1 if index is not None else self.term.LINES, 1
+                )
+            )
+            self._out.flush()
+            self._out.write(self.term.CLEAR_EOL.decode())
+            self._out.flush()
+            self._out.write(color.decode() + str)
+            self._out.flush()
 
 
 def get_status_bar_decorator(status_bar: MultiProgressBar, index: int):
@@ -120,17 +147,17 @@ def get_status_bar_decorator(status_bar: MultiProgressBar, index: int):
     :param index:int
     :return: int
     """
-    def decorator_generator(base, span, total_step, message: str):
+    def decorator_generator(base, span, total_step, message: str, force=False):
         cur_step = [0]
 
         def decorator(step_func):
-            mydiv = pow(10, len(str(total_step)) - 2)
+            mydiv = pow(10, len(str(total_step)) - 3)
             if mydiv < 10:
                 mydiv = 1
 
             def wrapper(*args):
                 cur_step[0] += 1
-                if cur_step[0] % mydiv == 0 or total_step - cur_step[0] <= mydiv:
+                if force or cur_step[0] % mydiv == 0 or total_step - cur_step[0] <= mydiv:
                     status_bar.update(index, (cur_step[0] / total_step) * span + base,
                                       message.format(cur_step, total_step))
                 step_func(*args)

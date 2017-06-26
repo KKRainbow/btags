@@ -73,17 +73,18 @@ if __name__ == '__main__':
     status_bar = MultiProgressBar(nb.jobs + 1, "Task ", sys.stdout)
     df = debug_info_mapper[nb.debug_info_format](bin_path, status_bar)
     if not df.has_debug_info():
-        print('No debug info found in binary file.')
+        status_bar.info(None, 'No debug info found in binary file.')
         exit()
 
     if not os.path.exists(db_path):
+        status_bar.info(None, 'Parsing tags and filling database...', status_bar.term.BLUE)
         Operation.prepare(db_path)
         Runner(df, nb.jobs, status_bar).run()
 
     if nb.only_database:
         exit()
 
-    print('Generating tag file...')
-    ct = tag_format_mapper[nb.tag_file_format](db_path)
+    status_bar.info(None, 'Generating tag file...')
+    ct = tag_format_mapper[nb.tag_file_format](db_path, status_bar)
     ct.get_tag_file(open(tag_path, 'a+'), project_path, nb.compile_dir)
-    print('Done!')
+    status_bar.info(None, 'Done!')

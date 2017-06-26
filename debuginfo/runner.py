@@ -1,7 +1,6 @@
 from concurrent.futures.thread import ThreadPoolExecutor as PoolExecutor
 from concurrent.futures import as_completed
 from terminal.statusbar import MultiProgressBar, get_status_bar_decorator
-import signal
 
 
 class Task:
@@ -41,18 +40,13 @@ class Runner:
 
     def run(self):
         with PoolExecutor(max_workers=self._concurrency_level) as executor:
-            def interrupt_handler(signal, frame):
-                import os
-                os.system("tput cnorm")
-                raise KeyboardInterrupt()
-            signal.signal(signal.SIGINT, interrupt_handler)
             add_task_future = executor.submit(self.submit_task, executor)
             try:
                 add_task_future.result()
             except Exception as e:
                 raise RunnerError("Error when add task: {}".format(e))
 
-            @self._status_bar_decorator(0, 1, len(self.task_submitted), "Task finished {0}/{1}")
+            @self._status_bar_decorator(0, 1, len(self.task_submitted), "Task finished {0}/{1}", True)
             def get_result(future):
                 future.result()
             for future in as_completed(self.task_submitted):

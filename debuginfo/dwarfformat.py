@@ -110,13 +110,13 @@ class DwarfInfoParseTask(Task):
         pair = attributes['DW_AT_comp_dir'].strip().split('): ')
         cu_file_directory = (pair[0] if len(pair) == 1 else pair[1]) if len(pair) != 0 else None
 
-        file_full_path = cu_file_directory.strip() + sep + cu_file_name.strip()
-        if not os.path.exists(file_full_path):
-            sys.stderr.write("Warning: file {} doesn't exist!\n".format(file_full_path))
-
         self._cu_db_item = self._op.add_compilation_unit(cu_file_directory, cu_file_name, self.index)
         self._status_bar_index = self._status_bar.get_an_index()
         self._status_bar_decorator = get_status_bar_decorator(self._status_bar, self._status_bar_index)
+
+        file_full_path = cu_file_directory.strip() + sep + cu_file_name.strip()
+        if not os.path.exists(file_full_path):
+            self._status_bar.info(self._status_bar_index, "Warning: file {} doesn't exist!".format(file_full_path))
 
     def _run(self):
         file_id_map = self._file_id_map
@@ -290,7 +290,6 @@ class DwarfMacroParseTask(Task):
             for item in macro_list_item:
                 parse_macro_list_item(item)
             cu_list_index += 1
-            self._status_bar.update(self._status_bar_index, 0.8, "Committing macro tags for cu %d" % cu_id)
             self._op.commit()
 
     def _after_run(self):
