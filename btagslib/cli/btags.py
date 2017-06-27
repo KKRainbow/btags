@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-import os, sys
+import os
+import sys
 from os.path import dirname
-from debuginfo.runner import Runner
-from debuginfo.dwarfformat import DwarfParseTaskGenerator
-from db.operation import Operation
-from tagfile.ctag import CtagFormat
+from btagslib.debuginfo.runner import Runner
+from btagslib.debuginfo.dwarfformat import DwarfParseTaskGenerator
+from btagslib.db.operation import Operation
+from btagslib.tagfile.ctag import CtagFormat
+from btagslib.terminal.statusbar import MultiProgressBar
 import argparse as ap
-from terminal.statusbar import MultiProgressBar
 
-if __name__ == '__main__':
+def main():
     debug_info_mapper = {
         'dwarf': DwarfParseTaskGenerator
     }
@@ -88,3 +89,6 @@ if __name__ == '__main__':
     ct = tag_format_mapper[nb.tag_file_format](db_path, status_bar)
     ct.get_tag_file(open(tag_path, 'a+'), project_path, nb.compile_dir)
     status_bar.info(None, 'Done!')
+
+if __name__ == '__main__':
+    main()
