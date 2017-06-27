@@ -2,11 +2,11 @@ from setuptools import setup, find_packages
 from os import path
 from btagslib.version import __version__
 
-with open(path.join(path.dirname(__file__), 'README.md')) as f:
+with open(path.join(path.dirname(__file__), 'README.rst')) as f:
     long_description = f.read()
 
 setup(
-    name='btagslib',
+    name='btags',
     version=__version__,
     description='Generate tag file according to the debug information such as DWARF including in the binary file',
     long_description=long_description,
